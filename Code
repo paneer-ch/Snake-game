@@ -1,0 +1,250 @@
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
+#include <SPI.h>
+
+// --- Pin definitions ---
+#define TFT_CS   10
+#define TFT_DC    9
+#define TFT_RST   8
+#define JOY_X    A0
+#define JOY_Y    A1
+#define JOY_BTN   2
+
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+
+// --- Game constants ---
+#define CELL       8          // px per grid cell
+#define COLS      (128 / CELL) // 16 columns
+#define ROWS      (160 / CELL) // 20 rows
+#define MAX_LEN   80
+#define SPEED_MS  150         // ms per game tick (lower = faster)
+
+// --- Colors ---
+#define C_BG      ST77XX_BLACK
+#define C_SNAKE   ST77XX_GREEN
+#define C_HEAD    0x07FF      // cyan
+#define C_FOOD    ST77XX_RED
+#define C_TEXT    ST77XX_WHITE
+#define C_BORDER  0x4208      // dark gray
+
+// --- Direction ---
+#define UP    0
+#define RIGHT 1
+#define DOWN  2
+#define LEFT  3
+
+// --- Snake state ---
+int snakeX[MAX_LEN], snakeY[MAX_LEN];
+int snakeLen;
+int dir, nextDir;
+int foodX, foodY;
+int score;
+bool gameOver;
+unsigned long lastTick;
+
+// --- Joystick deadzone ---
+#define DEAD 150
+
+void setup() {
+  pinMode(JOY_BTN, INPUT_PULLUP);
+  tft.initR(INITR_BLACKTAB);  // use INITR_GREENTAB if colors look off
+  tft.setRotation(0);
+  tft.fillScreen(C_BG);
+  randomSeed(analogRead(A2));
+  showTitle();
+}
+
+void loop() {
+  if (gameOver) {
+    if (digitalRead(JOY_BTN) == LOW) {
+      delay(300);
+      startGame();
+    }
+    return;
+  }
+
+  readJoystick();
+
+  unsigned long now = millis();
+  if (now - lastTick >= SPEED_MS) {
+    lastTick = now;
+    gameTick();
+  }
+}
+
+// ---- Game init ----
+void startGame() {
+  tft.fillScreen(C_BG);
+  drawBorder();
+
+  snakeLen = 4;
+  dir = RIGHT;
+  nextDir = RIGHT;
+  score = 0;
+  gameOver = false;
+
+  // Start in center
+  for (int i = 0; i < snakeLen; i++) {
+    snakeX[i] = COLS / 2 - i;
+    snakeY[i] = ROWS / 2;
+  }
+
+  placeFood();
+  drawScore();
+  lastTick = millis();
+}
+
+// ---- Title screen ----
+void showTitle() {
+  tft.fillScreen(C_BG);
+  tft.setTextColor(C_HEAD);
+  tft.setTextSize(2);
+  tft.setCursor(22, 40);
+  tft.print("SNAKE");
+
+  tft.setTextColor(C_TEXT);
+  tft.setTextSize(1);
+  tft.setCursor(14, 76);
+  tft.print("Joystick = move");
+  tft.setCursor(18, 92);
+  tft.print("Button = start");
+
+  tft.setTextColor(ST77XX_GREEN);
+  tft.setCursor(20, 120);
+  tft.print("Press button...");
+
+  // Wait for button press
+  while (digitalRead(JOY_BTN) == HIGH) {}
+  delay(200);
+  startGame();
+}
+
+// ---- Game Over screen ----
+void showGameOver() {
+  tft.fillScreen(C_BG);
+  tft.setTextColor(ST77XX_RED);
+  tft.setTextSize(2);
+  tft.setCursor(8, 50);
+  tft.print("GAME OVER");
+
+  tft.setTextColor(C_TEXT);
+  tft.setTextSize(1);
+  tft.setCursor(28, 82);
+  tft.print("Score: ");
+  tft.print(score);
+
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(14, 110);
+  tft.print("Press button...");
+}
+
+// ---- Joystick input ----
+void readJoystick() {
+  int x = analogRead(JOY_X) - 512;
+  int y = analogRead(JOY_Y) - 512;
+
+  // Only accept dominant axis input
+  if (abs(x) > abs(y)) {
+    if (x > DEAD  && dir != LEFT)  nextDir = RIGHT;
+    if (x < -DEAD && dir != RIGHT) nextDir = LEFT;
+  } else {
+    if (y > DEAD  && dir != UP)    nextDir = DOWN;
+    if (y < -DEAD && dir != DOWN)  nextDir = UP;
+  }
+}
+
+// ---- One game tick ----
+void gameTick() {
+  dir = nextDir;
+
+  // Erase tail cell
+  int tx = snakeX[snakeLen - 1];
+  int ty = snakeY[snakeLen - 1];
+  drawCell(tx, ty, C_BG);
+
+  // Shift body
+  for (int i = snakeLen - 1; i > 0; i--) {
+    snakeX[i] = snakeX[i - 1];
+    snakeY[i] = snakeY[i - 1];
+  }
+
+  // Redraw old head as body
+  drawCell(snakeX[0], snakeY[0], C_SNAKE);
+
+  // Move head
+  if (dir == UP)    snakeY[0]--;
+  if (dir == DOWN)  snakeY[0]++;
+  if (dir == LEFT)  snakeX[0]--;
+  if (dir == RIGHT) snakeX[0]++;
+
+  // Wall collision
+  if (snakeX[0] < 0 || snakeX[0] >= COLS ||
+      snakeY[0] < 0 || snakeY[0] >= ROWS) {
+    endGame(); return;
+  }
+
+  // Self collision
+  for (int i = 1; i < snakeLen; i++) {
+    if (snakeX[0] == snakeX[i] && snakeY[0] == snakeY[i]) {
+      endGame(); return;
+    }
+  }
+
+  // Food eaten
+  if (snakeX[0] == foodX && snakeY[0] == foodY) {
+    score++;
+    if (snakeLen < MAX_LEN) snakeLen++;
+    drawScore();
+    placeFood();
+  }
+
+  // Draw new head
+  drawCell(snakeX[0], snakeY[0], C_HEAD);
+  // Draw food (in case it was erased)
+  drawCell(foodX, foodY, C_FOOD);
+}
+
+void endGame() {
+  gameOver = true;
+  // Flash head red
+  for (int i = 0; i < 4; i++) {
+    drawCell(snakeX[0], snakeY[0], ST77XX_RED);
+    delay(120);
+    drawCell(snakeX[0], snakeY[0], C_BG);
+    delay(80);
+  }
+  showGameOver();
+}
+
+// ---- Draw helpers ----
+void drawCell(int cx, int cy, uint16_t color) {
+  tft.fillRect(cx * CELL + 1, cy * CELL + 1, CELL - 2, CELL - 2, color);
+}
+
+void drawBorder() {
+  tft.drawRect(0, 0, 128, 152, C_BORDER);
+}
+
+void placeFood() {
+  bool onSnake;
+  do {
+    onSnake = false;
+    foodX = random(0, COLS);
+    foodY = random(0, ROWS - 1); // keep above score bar
+    for (int i = 0; i < snakeLen; i++) {
+      if (snakeX[i] == foodX && snakeY[i] == foodY) {
+        onSnake = true; break;
+      }
+    }
+  } while (onSnake);
+  drawCell(foodX, foodY, C_FOOD);
+}
+
+void drawScore() {
+  tft.fillRect(0, 152, 128, 8, C_BG);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setTextSize(1);
+  tft.setCursor(2, 153);
+  tft.print("Score:");
+  tft.print(score);
+}
